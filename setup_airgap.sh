@@ -1,0 +1,100 @@
+# yum repository with installation media
+
+
+################## Docker ###############
+
+yum install vim yum-utils device-mapper-persistent-data lvm2 bash-completion
+
+yum remove podman buildah
+
+yum install ./docker/containerd.io-1.4.11-3.1.el8.x86_64.rpm ./docker/cri-tools-1.21.0-.el8.2.6.x86_64.rpm ./docker/docker-ce-20.10.9-3.el8.x86_64.rpm ./docker/docker-ce-cli-20.10.9-3.el8.x86_64.rpm ./docker/docker-ce-rootless-extras-20.10.9-3.el8.x86_64.rpm ./docker/docker-scan-plugin-0.8.0-3.el8.x86_64.rpm
+
+[ ! -d /etc/docker ] && mkdir /etc/docker
+
+cat > /etc/docker/daemon.json <<EOF
+{
+  "exec-opts": ["native.cgroupdriver=systemd"],
+  "log-driver": "json-file",
+  "log-opts": {
+    "max-size": "100m"
+  },
+  "storage-driver": "overlay2",
+  "storage-opts": [
+    "overlay2.override_kernel_check=true"
+  ]
+}
+EOF
+
+mkdir -p /etc/systemd/system/docker.service.d
+
+systemctl daemon-reload
+systemctl restart docker
+systemctl enable docker
+
+systemctl disable --now firewalld
+
+# test
+
+docker load --input ./images/hello-world.tar
+
+docker run hello-world
+
+
+############## Kubernetes ###############
+
+setenforce 0
+sed -i 's/^SELINUX=enforcing$/SELINUX=permissive/' /etc/selinux/config
+
+## disable swap in /etc/fstab
+swapoff <device in /etc/fstab>
+
+yum install ./kubernetes/kube*.rpm
+
+systemctl enable --now kubelet
+
+# Set iptables bridging
+cat <<EOF >  /etc/sysctl.d/k8s.conf
+net.bridge.bridge-nf-call-ip6tables = 1
+net.bridge.bridge-nf-call-iptables = 1
+EOF
+sysctl --system
+
+
+ls ./images/ | while read image; do docker load --input ./images/$image; done
+
+
+### Installation of cluster ####
+
+
+## modify kubeadm-config.yaml with required IP for api server
+
+kubeadm init --config kubeadm-config.yaml --v=8
+
+mkdir -p $HOME/.kube
+sudo cp -i /etc/kubernetes/admin.conf $HOME/.kube/config
+sudo chown $(id -u):$(id -g) $HOME/.kube/config
+
+
+kubectl cluster-info 
+kubectl get nodes -o wide
+
+## bash-completion
+
+echo "source <(kubectl completion bash)" >> ~/.bashrc
+
+source <(kubectl completion bash)
+
+### Install CNI
+
+# check default route exists!
+# ip route add default via <gateway ip> dev <dev id>
+
+kubectl apply -f calico.yaml
+kubectl get nodes -o wide
+kubectl get pods --all-namespaces
+
+
+#kubectl config set-context --current --namespace=kube-system
+
+
+
