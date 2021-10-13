@@ -1,0 +1,179 @@
+###############  Docker registry, different server ##############
+
+
+#Install docker as in kubernetes_airgap_docker.txt
+
+yum install -y vim yum-utils  bash-completion openssl
+
+# generate certificate, replace "docker.local" with hostname, Common Name must match same hostname
+
+REG_HOSTNAME="myreg.local"
+
+mkdir certs
+
+openssl req -newkey rsa:4096 -nodes -sha256 -keyout certs/local_registry.key -x509 -days 36500 -out certs/local_registry.crt -addext "subjectAltName = DNS:$REG_HOSTNAME"
+
+### add:
+###    docker
+### to /etc/docker/daemon.json, restart docker
+
+ls ./images/ | while read image; do docker load --input ./images/$image; done
+
+docker run -d   \
+--restart=always   \
+--name registry   \
+-v "$(pwd)"/certs:/certs   \
+-v /mnt/registry:/var/lib/registry   \
+-e REGISTRY_HTTP_ADDR=0.0.0.0:443   \
+-e REGISTRY_HTTP_TLS_CERTIFICATE=/certs/local_registry.crt   \
+-e REGISTRY_HTTP_TLS_KEY=/certs/local_registry.key   \
+-p 443:443   \
+registry:2
+
+
+docker tag k8s.gcr.io/kube-apiserver:v1.21.5 $REG_HOSTNAME:443/kube-apiserver:v1.21.5
+docker tag k8s.gcr.io/kube-controller-manager:v1.21.5 $REG_HOSTNAME:443/kube-controller-manager:v1.21.5
+docker tag k8s.gcr.io/kube-scheduler:v1.21.5  $REG_HOSTNAME:443/kube-scheduler:v1.21.5
+docker tag k8s.gcr.io/kube-proxy:v1.21.5 $REG_HOSTNAME:443/kube-proxy:v1.21.5
+docker tag k8s.gcr.io/pause:3.4.1 $REG_HOSTNAME:443/pause:3.4.1
+docker tag k8s.gcr.io/coredns/coredns:v1.8.0 $REG_HOSTNAME:443/coredns/coredns:v1.8.0
+docker tag k8s.gcr.io/etcd:3.4.13-0 $REG_HOSTNAME:443/etcd:3.4.13-0
+
+
+docker tag calico/cni:v3.20.2 $REG_HOSTNAME:443/calico/cni:v3.20.2
+docker tag calico/pod2daemon-flexvol:v3.20.2 $REG_HOSTNAME:443/calico/pod2daemon-flexvol:v3.20.2
+docker tag calico/kube-controllers:v3.20.2 $REG_HOSTNAME:443/calico/kube-controllers:v3.20.2
+docker tag calico/node:v3.20.2 $REG_HOSTNAME:443/calico/node:v3.20.2
+
+
+docker push $REG_HOSTNAME:443/kube-apiserver:v1.21.5
+docker push $REG_HOSTNAME:443/kube-controller-manager:v1.21.5
+docker push $REG_HOSTNAME:443/kube-scheduler:v1.21.5
+docker push $REG_HOSTNAME:443/kube-proxy:v1.21.5
+docker push $REG_HOSTNAME:443/pause:3.4.1
+docker push $REG_HOSTNAME:443/etcd:3.4.13-0
+docker push $REG_HOSTNAME:443/coredns/coredns:v1.8.0
+
+docker push $REG_HOSTNAME:443/calico/cni:v3.20.2
+docker push $REG_HOSTNAME:443/calico/pod2daemon-flexvol:v3.20.2
+docker push $REG_HOSTNAME:443/calico/kube-controllers:v3.20.2
+docker push $REG_HOSTNAME:443/calico/node:v3.20.2
+
+scp ./certs/local_registry.crt root@master:/etc/pki/tls/certs
+
+### on K8S master/worker ####
+
+################## Containerd ###############
+
+# yum repository with installation media
+
+yum install -y vim yum-utils  bash-completion openssl
+
+yum remove -y podman buildah
+
+yum install -y ./crio/*.rpm ./docker/cri-tools-1.21.0-.el8.2.6.x86_64.rpm
+
+# Create the .conf file to load the modules at bootup
+cat <<EOF | sudo tee /etc/modules-load.d/crio.conf
+overlay
+br_netfilter
+EOF
+
+sudo modprobe overlay
+sudo modprobe br_netfilter
+
+# Set up required sysctl params, these persist across reboots.
+cat <<EOF | sudo tee /etc/sysctl.d/99-kubernetes-cri.conf
+net.bridge.bridge-nf-call-iptables  = 1
+net.ipv4.ip_forward                 = 1
+net.bridge.bridge-nf-call-ip6tables = 1
+EOF
+
+sudo sysctl --system
+
+#replace content /etc/containers/registries.conf with:
+unqualified-search-registries = ["k8s.gcr.io", "docker.io"]
+
+[[registry]]
+prefix = "k8s.gcr.io"
+location = "$REG_HOSTNAME:443"
+insecure = true
+
+[[registry]]
+prefix = "docker.io"
+location = "$REG_HOSTNAME:443"
+insecure = true
+###########################
+
+
+### add in /etc/crio/crio.conf
+
+[crio.image]
+pause_image="k8s.gcr.io/pause:3.4.1"
+
+
+systemctl disable --now firewalld
+systemctl daemon-reload
+systemctl enable crio --now
+
+############## Kubernetes ###############
+
+setenforce 0
+sed -i 's/^SELINUX=enforcing$/SELINUX=permissive/' /etc/selinux/config
+
+## disable swap in /etc/fstab
+swapoff -a
+
+yum install -y ./kubernetes/kube*.rpm
+
+systemctl enable --now kubelet
+
+
+### Installation of cluster ####
+
+
+# check 
+
+kubeadm config images pull
+
+#check registry logs
+
+
+### if worker join
+
+
+### if master continue:
+
+## modify kubeadm-config.yaml with required IP for api server
+
+
+kubeadm init --config kubeadm-config.yaml 
+
+mkdir -p $HOME/.kube
+sudo cp -i /etc/kubernetes/admin.conf $HOME/.kube/config
+sudo chown $(id -u):$(id -g) $HOME/.kube/config
+
+
+kubectl cluster-info 
+kubectl get nodes -o wide
+
+## bash-completion
+
+echo "source <(kubectl completion bash)" >> ~/.bashrc
+
+source <(kubectl completion bash)
+
+### Install CNI
+
+# check default route exists!
+# ip route add default via <gateway ip> dev <dev id>
+
+kubectl apply -f calico.yaml
+kubectl get nodes -o wide
+kubectl get pods --all-namespaces
+
+
+#kubectl config set-context --current --namespace=kube-system
+
+
+
