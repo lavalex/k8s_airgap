@@ -1,0 +1,13 @@
+docker load --input controller.tar
+docker load --input kube-webhook-certgen.tar
+docker load --input echo.tar
+
+docker tag k8s.gcr.io/ingress-nginx/controller:v1.0.4 registry.local:443/ingress-nginx/controller:v1.0.4
+docker tag k8s.gcr.io/ingress-nginx/kube-webhook-certgen:v1.1.1 registry.local:443/ingress-nginx/kube-webhook-certgen:v1.1.1
+docker tag ealen/echo-server registry.local:443/ealen/echo-server
+
+docker push registry.local:443/ingress-nginx/controller:v1.0.4
+docker push registry.local:443/ingress-nginx/kube-webhook-certgen:v1.1.1
+docker push registry.local:443/ealen/echo-server
+
+kubectl apply -f nginx_ingress.yaml
